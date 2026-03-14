@@ -225,9 +225,48 @@ if (!window.__nsFilterExtensionLoaded) {
         }
     }
 
+    let globalAliasMap = null;
+
+    // Escanea todos los selects ocultos en la página de NetSuite para mapear "Nombres de Interfaz" -> "Internal IDs"
+    function buildAliasMap() {
+        globalAliasMap = {};
+        const options = document.querySelectorAll('option');
+        for (let i = 0; i < options.length; i++) {
+            const opt = options[i];
+            const text = opt.text;
+            const value = opt.value;
+            if (text && value) {
+                const textKey = text.trim().toLowerCase();
+                if (!globalAliasMap[textKey]) globalAliasMap[textKey] = new Set();
+                globalAliasMap[textKey].add(value.toLowerCase());
+            }
+        }
+    }
+
+    // Extraedor profundo de atributos ocultos sin disparar reflows pesados
+    function getHiddenData(node) {
+        let data = [];
+        const walk = (n) => {
+            if (n.nodeType === 1) {
+                ['id', 'value', 'data-value', 'name', 'title', 'onmousedown', 'onclick'].forEach(attr => {
+                    const val = n.getAttribute(attr);
+                    if (val) data.push(val);
+                });
+                const children = n.children;
+                for (let i = 0; i < children.length; i++) {
+                    walk(children[i]);
+                }
+            }
+        };
+        walk(node);
+        return data.join(' ');
+    }
+
     function applyFilter(term, contextNode = document.body) {
         const terms = term.trim().toLowerCase().split(/\s+/).filter(t => t);
         let elementsToFilter = [];
+        
+        if (!globalAliasMap) buildAliasMap();
         
         if (contextNode !== document.body) {
             const allInnerElems = contextNode.querySelectorAll('div, tr, li, .dropdown-row');
@@ -264,8 +303,22 @@ if (!window.__nsFilterExtensionLoaded) {
                 return;
             }
 
-            // Búsqueda multi-criteriod: innerText visible + title oculto + possible id data
-            const searchableText = (el.innerText + ' ' + (el.getAttribute('title') || '') + ' ' + elId).toLowerCase();
+            // Agarrar texto base asegurando captar spans ocultos mediante textContent
+            const textBase = el.textContent.trim().toLowerCase();
+            
+            // Buscar si el texto visualizado mapea nativamente hacia uno o más ID internos de NetSuite
+            let aliasText = '';
+            if (globalAliasMap[textBase]) {
+                aliasText = Array.from(globalAliasMap[textBase]).join(' ');
+            }
+
+            // Atributos y Eventos ocultos
+            const hiddenData = getHiddenData(el).toLowerCase();
+
+            // Combinar todos los vectores de búsqueda en un macro string eficiente
+            const searchableText = (textBase + ' ' + aliasText + ' ' + hiddenData + ' ' + elId).toLowerCase();
+            
+            // Requerir coincidencia exacta tipo AND
             const isMatch = terms.every(t => searchableText.includes(t));
 
             el.style.display = isMatch ? "" : "none";
