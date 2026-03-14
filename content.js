@@ -60,6 +60,22 @@ function injectStyles() {
     document.head.appendChild(style);
 }
 
+const DROPDOWN_SELECTORS = [
+    '.uir-field-choices',
+    '.dropdownDiv',
+    '.listboxcontainer',
+    '.uir-select-popup',
+    '[id^="dropdown_"]',
+    'div[id*="dropdown"]',
+    'div[class*="dropdown"]'
+].join(', ');
+
+function isDropdownNode(node) {
+    if (node.nodeType !== 1) return false;
+    if (node.id === 'ns-filter-container') return false;
+    return node.matches && node.matches(DROPDOWN_SELECTORS);
+}
+
 function getOrCreateSearchContainer() {
     let container = document.getElementById('ns-filter-container');
     
@@ -88,14 +104,14 @@ function getOrCreateSearchContainer() {
 
         input.addEventListener('input', (e) => {
             // El dropdown activo es el ancestro principal del input en este momento
-            const dropdown = container.closest('.uir-field-choices, [id^="dropdown_"]') || document.body;
+            const dropdown = container.closest(DROPDOWN_SELECTORS) || document.body;
             applyFilter(e.target.value, dropdown);
             clearBtn.style.display = e.target.value ? 'block' : 'none';
         });
 
         clearBtn.addEventListener('click', () => {
             input.value = '';
-            const dropdown = container.closest('.uir-field-choices, [id^="dropdown_"]') || document.body;
+            const dropdown = container.closest(DROPDOWN_SELECTORS) || document.body;
             applyFilter('', dropdown);
             clearBtn.style.display = 'none';
             input.focus();
@@ -113,25 +129,35 @@ function getOrCreateSearchContainer() {
 function applyFilter(term, contextNode = document.body) {
     term = term.toLowerCase();
     
-    // Buscar filas O items de dropdown dentro del contexto activo
-    // .uir-list-row-tr y .uir-machine-row aplican para tablas de variables,
-    // .uir-dropdown-item (o similar) puede aplicar para selects transformados
-    const selectors = '.uir-machine-table tr.uir-list-row-tr, .uir-machine-table tr.uir-machine-row, #filter_splits tr, #column_splits tr, tr.uir-list-row-tr, tr.uir-machine-row, .dropdown-row, tr';
-    const rows = contextNode.querySelectorAll(selectors);
+    let elementsToFilter = [];
     
-    rows.forEach(row => {
-        // Ignorar nuestra propia fila contenedor o input
-        if (row.id === 'ns-filter-container' || row.closest('#ns-filter-container')) return;
+    if (contextNode !== document.body && contextNode.matches(DROPDOWN_SELECTORS)) {
+        // En un dropdown, seleccionamos elementos internos que actúan como opciones individuales
+        const allInnerElems = contextNode.querySelectorAll('div, tr, li, .dropdown-row');
+        elementsToFilter = Array.from(allInnerElems).filter(el => {
+            if (el.id === 'ns-filter-container' || el.closest('#ns-filter-container')) return false;
+            // Solo procesar elementos "hoja" (innermost) o nodos que no contengan contenedores anidados grandotes
+            const containsBlockElements = el.querySelector('div, table, ul');
+            return !containsBlockElements;
+        });
+    } else {
+        // Filtrado normal en las tablas principales de edición sublista
+        const tableSelectors = '.uir-machine-table tr.uir-list-row-tr, .uir-machine-table tr.uir-machine-row, #filter_splits tr, #column_splits tr, tr.uir-list-row-tr, tr.uir-machine-row';
+        elementsToFilter = Array.from(contextNode.querySelectorAll(tableSelectors));
+    }
+    
+    elementsToFilter.forEach(el => {
+        if (el.id === 'ns-filter-container' || el.closest('#ns-filter-container')) return;
 
-        // Preservar siempre la fila vacía de inserción
-        const rowId = row.id || "";
-        if (rowId.endsWith('_addedit') || row.classList.contains('uir-machine-addrow')) {
-            row.style.display = "";
+        // Preservar siempre la fila vacía de inserción (donde se añade un nuevo criterio/resultado)
+        const elId = el.id || "";
+        if (elId.endsWith('_addedit') || el.classList.contains('uir-machine-addrow')) {
+            el.style.display = "";
             return;
         }
 
-        const text = row.innerText.toLowerCase();
-        row.style.display = text.includes(term) ? "" : "none";
+        const text = el.innerText.toLowerCase();
+        el.style.display = text.includes(term) ? "" : "none";
     });
 }
 
@@ -142,53 +168,71 @@ function init() {
     const searchInput = document.getElementById('ns-filter-search-input');
     let activeDropdown = null;
     
+    function injectIntoDropdown(node) {
+        if (activeDropdown === node && searchContainer.parentNode === node) return;
+        
+        const style = window.getComputedStyle(node);
+        if (style.display === 'none' || style.visibility === 'hidden') return;
+
+        activeDropdown = node;
+        activeDropdown.prepend(searchContainer);
+        searchContainer.style.display = 'block';
+        searchInput.value = '';
+        applyFilter('', activeDropdown);
+        setTimeout(() => searchInput.focus(), 50);
+    }
+
+    function closeDropdown() {
+        searchContainer.style.display = 'none';
+        document.body.appendChild(searchContainer);
+        activeDropdown = null;
+    }
+
     const observer = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
-            // NetSuite muestra el dropdown montándolo al body o alterando su display.
-            // Los elementos habituales incluyen .uir-field-choices o divs flotantes generados dinámicamente.
-            if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+            if (mutation.type === 'childList') {
                 mutation.addedNodes.forEach(node => {
-                    if (node.nodeType === 1) { // ELEMENT_NODE
-                        // Comprobar si NetSuite acaba de crear o mostrar un dropdown selection div.
-                        if (node.classList && (node.classList.contains('uir-field-choices') || node.id.startsWith('dropdown_') || node.matches('div[id*="dropdown"]'))) {
-                            activeDropdown = node;
-                            
-                            // Mover nuestro contenedor como hijo principal y hacerlo visible
-                            activeDropdown.prepend(searchContainer);
-                            searchContainer.style.display = 'block';
-                            
-                            // Resetear el valor
-                            searchInput.value = '';
-                            applyFilter('', activeDropdown);
-                            setTimeout(() => searchInput.focus(), 50);
-                        }
+                    if (isDropdownNode(node)) {
+                        injectIntoDropdown(node);
+                    } else if (node.nodeType === 1) {
+                        const subDrops = node.querySelectorAll(DROPDOWN_SELECTORS);
+                        subDrops.forEach(injectIntoDropdown);
                     }
                 });
             }
-            // Capturar si un dropdown existente que estaba en display: none ahora  es visible
-            if (mutation.type === 'attributes' && mutation.attributeName === 'style') {
+            if (mutation.type === 'attributes' && (mutation.attributeName === 'style' || mutation.attributeName === 'class')) {
                 const node = mutation.target;
-                if (node.classList && (node.classList.contains('uir-field-choices') || node.id.startsWith('dropdown_') || node.matches('div[id*="dropdown"]'))) {
-                    if (window.getComputedStyle(node).display !== 'none' && activeDropdown !== node) {
-                        activeDropdown = node;
-                        activeDropdown.prepend(searchContainer);
-                        searchContainer.style.display = 'block';
-                        searchInput.value = '';
-                        applyFilter('', activeDropdown);
-                        setTimeout(() => searchInput.focus(), 50);
-                    } else if (window.getComputedStyle(node).display === 'none' && activeDropdown === node) {
-                        // El dropdown se cerró
-                        searchContainer.style.display = 'none';
-                        document.body.appendChild(searchContainer); // devolver al body para caché
-                        activeDropdown = null;
+                if (isDropdownNode(node)) {
+                    const style = window.getComputedStyle(node);
+                    const isVisible = style.display !== 'none' && style.visibility !== 'hidden';
+                    
+                    if (isVisible) {
+                        injectIntoDropdown(node);
+                    } else if (!isVisible && activeDropdown === node) {
+                        closeDropdown();
                     }
                 }
             }
         }
     });
 
-    // Observar tanto el DOM como los atributos CSS style del body y sus hijos
-    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] });
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
+
+    // Fallback: Si el observer no captura el dropdown asíncrono eficientemente, el clic del usuario lo garantiza
+    document.addEventListener('mousedown', (e) => {
+        if (e.target.closest('#ns-filter-container')) return;
+        setTimeout(() => {
+            const dropdowns = document.querySelectorAll(DROPDOWN_SELECTORS);
+            for (let node of dropdowns) {
+                if (node.id === 'ns-filter-container') continue;
+                const style = window.getComputedStyle(node);
+                if (style.display !== 'none' && style.visibility !== 'hidden') {
+                    injectIntoDropdown(node);
+                    break;
+                }
+            }
+        }, 100);
+    });
 }
 
 // Iniciar usando comprobación recurrente para manejo dinámico
