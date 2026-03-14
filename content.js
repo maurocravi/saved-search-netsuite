@@ -226,6 +226,7 @@ if (!window.__nsFilterExtensionLoaded) {
     }
 
     let globalAliasMap = [];
+    let fastAliasMap = new Map();
 
     // Ahora el mapeo se delega al puente asíncrono (Main World Injection)
     function buildAliasMap() {
@@ -307,14 +308,10 @@ if (!window.__nsFilterExtensionLoaded) {
 
             // Agarrar texto base asegurando limpieza agresiva de saltos de línea y nbsp ocultos
             const rawText = el.textContent.replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
-            const textBase = rawText.replace(/[()]/g, ' ');
+            const textBase = rawText.replace(/[()]/g, ' ').trim();
             
-            // Buscar si el texto visualizado mapea parcialmente hacia uno o más ID internos vinculados (iterando Array)
-            let aliasText = '';
-            const matchedAliases = globalAliasMap.filter(opt => rawText.includes(opt.text) || opt.text.includes(rawText));
-            if (matchedAliases.length > 0) {
-                aliasText = matchedAliases.map(opt => opt.value).join(' ');
-            }
+            // Extracción instantánea sin loops anidados
+            let aliasText = fastAliasMap.get(rawText) || fastAliasMap.get(textBase) || '';
 
             // Atributos y Eventos ocultos
             const hiddenData = getHiddenData(el).toLowerCase().replace(/[()]/g, ' ');
@@ -364,6 +361,10 @@ if (!window.__nsFilterExtensionLoaded) {
             // Recibir los datos del script espía inyectado
             if (event.source === window && event.data && event.data.type === 'NS_DICT_DATA') {
                 globalAliasMap = event.data.payload;
+                fastAliasMap.clear();
+                globalAliasMap.forEach(item => {
+                    fastAliasMap.set(item.text, item.value); // Clave exacta -> ID exacto
+                });
                 console.log(`[NetSuite Extension] Recibidos ${globalAliasMap.length} alias de campos desde NetSuite Global Window.`);
             }
         });
