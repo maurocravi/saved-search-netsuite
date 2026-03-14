@@ -6,8 +6,8 @@ const extBrowser = typeof browser !== 'undefined' ? browser : chrome;
 const TAILWIND_STYLES = `
 .ns-filter-container {
     position: fixed;   
-    top: 1rem;         
-    right: 1rem;       
+    top: 3.5rem;       /* Move down to avoid top button ribbon in NetSuite editor */
+    right: 2rem;       
     z-index: 9999;
     display: flex;
     align-items: center;
@@ -19,12 +19,14 @@ const TAILWIND_STYLES = `
     border-style: solid;
     border-color: #3b82f6; 
     border-radius: 0.375rem; 
-    width: 16rem;      
+    width: 18rem;      
     box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
     background-color: white;
     color: black;
     outline: none;
     box-sizing: border-box;
+    font-family: inherit;
+    font-size: 14px;
 }
 .ns-filter-input:focus {
     border-color: #2563eb; 
@@ -98,9 +100,19 @@ function getOrCreateSearchInput() {
 function applyFilter(term) {
     term = term.toLowerCase();
     // ".uir-list-row-tr" captura filas de Results, Filters y cualquier otra tabla estándar.
-    const rows = document.querySelectorAll('.uir-list-row-tr');
+    // En el modo edición, las sublistas también cargan bajo clases uir-machine-row o similares,
+    // pero NetSuite típicamente conserva usabilidad sobre uir-list-row-tr o uir-machine-row.
+    // Para las sublistas del editor de búsquedas (Criteria, Results), usamos 'tr.uir-list-row-tr, tr.uir-machine-row'.
+    const rows = document.querySelectorAll('tr.uir-list-row-tr, tr.uir-machine-row');
     
     rows.forEach(row => {
+        // Preservar siempre la fila vacía de inserción (donde se añade un nuevo criterio/resultado)
+        const rowId = row.id || "";
+        if (rowId.endsWith('_addedit') || row.classList.contains('uir-machine-addrow')) {
+            row.style.display = "";
+            return;
+        }
+
         const cells = row.querySelectorAll('td');
         let text = '';
         // Buscar solo en la primera y segunda celda (índices 0 y 1)
@@ -112,11 +124,16 @@ function applyFilter(term) {
 }
 
 function init() {
+    // Validar el contexto: Ejecutar solo si estamos en la edición/creación de un Saved Search
+    if (!window.location.pathname.includes('app/common/search/search.nl')) {
+        return; 
+    }
+
     injectStyles();
     const searchInput = getOrCreateSearchInput();
     
     // Configurar MutationObserver para capturar cambios en el DOM asíncronamente
-    // Buscamos siempre document.body para no perder la referencia si se reemplazan contenedores enteros (ej al cambiar pestañas)
+    // Al manipular sublistas o cambiar pestañas en el search.nl, el form cambia.
     const formContainer = document.body;
     
     const observer = new MutationObserver((mutations) => {
@@ -133,7 +150,8 @@ function init() {
         if (shouldRefilter) {
             // Aplicar el filtro actual al nuevo DOM si tenemos un término escrito
             if (searchInput.value) {
-                applyFilter(searchInput.value);
+                // Utiliza setTimeout para dejar que NetSuite renderice primero sus bindings
+                setTimeout(() => applyFilter(searchInput.value), 50);
             }
         }
     });
@@ -141,5 +159,5 @@ function init() {
     observer.observe(formContainer, { childList: true, subtree: true });
 }
 
-// Iniciar cuando el DOM se cargue (aún si la tabla de NetSuite no terminó)
+// Iniciar cuando el DOM se cargue
 window.addEventListener('load', init);
