@@ -5,22 +5,28 @@ const extBrowser = typeof browser !== 'undefined' ? browser : chrome;
 // Evitamos inyectar CDN para no romper las CSP ni el diseño NetSuite por el 'preflight'
 const TAILWIND_STYLES = `
 .ns-filter-container {
-    position: fixed;   
-    top: 5rem;         /* Move down to avoid top button ribbon in NetSuite editor */
-    right: 2rem;       
-    z-index: 2147483647;
+    display: none; /* Oculto por defecto hasta que se abra un dropdown */
+    width: 100%;
+    padding: 0.5rem;
+    box-sizing: border-box;
+    background-color: #f3f4f6; /* Fondo ligero para la caja del buscador */
+    border-bottom: 1px solid #e5e7eb;
+}
+.ns-filter-wrapper {
+    position: relative;
+    width: 100%;
     display: flex;
     align-items: center;
 }
 .ns-filter-input {
     padding: 0.5rem;
     padding-right: 2rem;
-    border-width: 2px;
+    border-width: 1px;
     border-style: solid;
-    border-color: #3b82f6; 
-    border-radius: 0.375rem; 
-    width: 18rem;      
-    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+    border-color: #d1d5db; 
+    border-radius: 0.25rem; 
+    width: 100%;      
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.05);
     background-color: white;
     color: black;
     outline: none;
@@ -54,71 +60,77 @@ function injectStyles() {
     document.head.appendChild(style);
 }
 
-function getOrCreateSearchInput() {
+function getOrCreateSearchContainer() {
     let container = document.getElementById('ns-filter-container');
-    let input = document.getElementById('ns-filter-search-input');
     
     if (!container) {
         container = document.createElement('div');
         container.id = 'ns-filter-container';
         container.className = 'ns-filter-container';
 
-        input = document.createElement('input');
+        const wrapper = document.createElement('div');
+        wrapper.className = 'ns-filter-wrapper';
+
+        const input = document.createElement('input');
         input.id = 'ns-filter-search-input';
-        input.placeholder = "Filtrar campos...";
+        input.placeholder = "Filtrar opciones...";
         input.className = "ns-filter-input";
         
-        // Evitar que el keypress en el input dispare eventos de la app NetSuite
+        // Evitar que el keypress dispare navegación de NS
         input.addEventListener('keydown', (e) => e.stopPropagation());
         
         const clearBtn = document.createElement('button');
-        clearBtn.innerHTML = '&#x2715;'; // X symbol
+        clearBtn.innerHTML = '&#x2715;'; 
         clearBtn.className = 'ns-filter-clear';
-        clearBtn.style.display = 'none'; // oculto inicialmente
+        clearBtn.style.display = 'none'; 
         clearBtn.type = 'button';
         clearBtn.title = 'Limpiar búsqueda';
 
         input.addEventListener('input', (e) => {
-            applyFilter(e.target.value);
+            // El dropdown activo es el ancestro principal del input en este momento
+            const dropdown = container.closest('.uir-field-choices, [id^="dropdown_"]') || document.body;
+            applyFilter(e.target.value, dropdown);
             clearBtn.style.display = e.target.value ? 'block' : 'none';
         });
 
         clearBtn.addEventListener('click', () => {
             input.value = '';
-            applyFilter('');
+            const dropdown = container.closest('.uir-field-choices, [id^="dropdown_"]') || document.body;
+            applyFilter('', dropdown);
             clearBtn.style.display = 'none';
             input.focus();
         });
         
-        container.appendChild(input);
-        container.appendChild(clearBtn);
+        wrapper.appendChild(input);
+        wrapper.appendChild(clearBtn);
+        container.appendChild(wrapper);
+        // Lo creamos inicialmente en caché dentro de body
         document.body.appendChild(container);
     }
-    return input;
+    return container;
 }
 
-function applyFilter(term) {
+function applyFilter(term, contextNode = document.body) {
     term = term.toLowerCase();
-    // ".uir-list-row-tr" captura filas de Results, Filters y cualquier otra tabla estándar.
-    // En el modo edición, las sublistas también cargan bajo clases uir-machine-row o similares,
-    // Nos aseguramos de buscar en #filter_splits, #column_splits, o cualquier contenedor uir-machine-table.
-    const selectors = '.uir-machine-table tr.uir-list-row-tr, .uir-machine-table tr.uir-machine-row, #filter_splits tr, #column_splits tr, tr.uir-list-row-tr, tr.uir-machine-row';
-    const rows = document.querySelectorAll(selectors);
+    
+    // Buscar filas O items de dropdown dentro del contexto activo
+    // .uir-list-row-tr y .uir-machine-row aplican para tablas de variables,
+    // .uir-dropdown-item (o similar) puede aplicar para selects transformados
+    const selectors = '.uir-machine-table tr.uir-list-row-tr, .uir-machine-table tr.uir-machine-row, #filter_splits tr, #column_splits tr, tr.uir-list-row-tr, tr.uir-machine-row, .dropdown-row, tr';
+    const rows = contextNode.querySelectorAll(selectors);
     
     rows.forEach(row => {
-        // Preservar siempre la fila vacía de inserción (donde se añade un nuevo criterio/resultado)
+        // Ignorar nuestra propia fila contenedor o input
+        if (row.id === 'ns-filter-container' || row.closest('#ns-filter-container')) return;
+
+        // Preservar siempre la fila vacía de inserción
         const rowId = row.id || "";
         if (rowId.endsWith('_addedit') || row.classList.contains('uir-machine-addrow')) {
             row.style.display = "";
             return;
         }
 
-        const cells = row.querySelectorAll('td');
-        let text = '';
-        // Buscar solo en la primera y segunda celda (índices 0 y 1)
-        if (cells.length > 0) text += cells[0].innerText.toLowerCase() + ' ';
-        if (cells.length > 1) text += cells[1].innerText.toLowerCase();
-
+        const text = row.innerText.toLowerCase();
         row.style.display = text.includes(term) ? "" : "none";
     });
 }
@@ -126,33 +138,57 @@ function applyFilter(term) {
 function init() {
     console.log("Extensión NetSuite cargada en editor");
     injectStyles();
-    const searchInput = getOrCreateSearchInput();
-    
-    // Configurar MutationObserver para capturar cambios en el DOM asíncronamente
-    // Al manipular sublistas o cambiar pestañas en el search.nl, el form cambia.
-    const formContainer = document.body;
+    const searchContainer = getOrCreateSearchContainer();
+    const searchInput = document.getElementById('ns-filter-search-input');
+    let activeDropdown = null;
     
     const observer = new MutationObserver((mutations) => {
-        let shouldRefilter = false;
-        // Solo necesitamos saber si hubo NINGUNA mutación en nodos hijos. 
-        // Si entra un nodo de fila nuevo, se debe re-aplicar
         for (const mutation of mutations) {
-            if (mutation.type === 'childList') {
-                shouldRefilter = true;
-                break;
+            // NetSuite muestra el dropdown montándolo al body o alterando su display.
+            // Los elementos habituales incluyen .uir-field-choices o divs flotantes generados dinámicamente.
+            if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+                mutation.addedNodes.forEach(node => {
+                    if (node.nodeType === 1) { // ELEMENT_NODE
+                        // Comprobar si NetSuite acaba de crear o mostrar un dropdown selection div.
+                        if (node.classList && (node.classList.contains('uir-field-choices') || node.id.startsWith('dropdown_') || node.matches('div[id*="dropdown"]'))) {
+                            activeDropdown = node;
+                            
+                            // Mover nuestro contenedor como hijo principal y hacerlo visible
+                            activeDropdown.prepend(searchContainer);
+                            searchContainer.style.display = 'block';
+                            
+                            // Resetear el valor
+                            searchInput.value = '';
+                            applyFilter('', activeDropdown);
+                            setTimeout(() => searchInput.focus(), 50);
+                        }
+                    }
+                });
             }
-        }
-
-        if (shouldRefilter) {
-            // Aplicar el filtro actual al nuevo DOM si tenemos un término escrito
-            if (searchInput.value) {
-                // Utiliza setTimeout para dejar que NetSuite renderice primero sus bindings
-                setTimeout(() => applyFilter(searchInput.value), 50);
+            // Capturar si un dropdown existente que estaba en display: none ahora  es visible
+            if (mutation.type === 'attributes' && mutation.attributeName === 'style') {
+                const node = mutation.target;
+                if (node.classList && (node.classList.contains('uir-field-choices') || node.id.startsWith('dropdown_') || node.matches('div[id*="dropdown"]'))) {
+                    if (window.getComputedStyle(node).display !== 'none' && activeDropdown !== node) {
+                        activeDropdown = node;
+                        activeDropdown.prepend(searchContainer);
+                        searchContainer.style.display = 'block';
+                        searchInput.value = '';
+                        applyFilter('', activeDropdown);
+                        setTimeout(() => searchInput.focus(), 50);
+                    } else if (window.getComputedStyle(node).display === 'none' && activeDropdown === node) {
+                        // El dropdown se cerró
+                        searchContainer.style.display = 'none';
+                        document.body.appendChild(searchContainer); // devolver al body para caché
+                        activeDropdown = null;
+                    }
+                }
             }
         }
     });
 
-    observer.observe(formContainer, { childList: true, subtree: true });
+    // Observar tanto el DOM como los atributos CSS style del body y sus hijos
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style'] });
 }
 
 // Iniciar usando comprobación recurrente para manejo dinámico
