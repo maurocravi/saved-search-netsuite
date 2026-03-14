@@ -54,6 +54,19 @@ if (!window.__nsFilterExtensionLoaded) {
     .ns-filter-clear:hover {
         color: #4b5563;
     }
+    .ns-filter-counter {
+        margin-left: auto;
+        margin-right: 2.5rem;
+        font-size: 0.75rem;
+        color: #6b7280;
+        font-weight: 500;
+        white-space: nowrap;
+    }
+    .ns-highlight {
+        background-color: #fef08a; /* bg-yellow-200 */
+        color: #000;
+        border-radius: 2px;
+    }
     /* Estilos forzados para anular la ocultación de NetSuite */
     .ns-dropdown-locked {
         display: block !important;
@@ -91,8 +104,14 @@ if (!window.__nsFilterExtensionLoaded) {
         input.placeholder = "Filtrar opciones...";
         input.className = "ns-filter-input";
         
-        // Detener eventos para prevenir que NetSuite capture el tipeo
-        input.addEventListener('keydown', (e) => e.stopPropagation());
+        // Detener eventos para prevenir que NetSuite capture el tipeo (excepto Flechas para navegación nativa)
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+                // Al permitir propagación, NetSuite recibe el evento y mueve su selección interna
+                return;
+            }
+            e.stopPropagation();
+        });
         input.addEventListener('keypress', (e) => e.stopPropagation());
         input.addEventListener('keyup', (e) => e.stopPropagation());
         
@@ -100,6 +119,11 @@ if (!window.__nsFilterExtensionLoaded) {
         input.addEventListener('mousedown', (e) => e.stopPropagation());
         input.addEventListener('click', (e) => e.stopPropagation());
         
+        const counter = document.createElement('span');
+        counter.id = 'ns-filter-counter';
+        counter.className = 'ns-filter-counter';
+        counter.style.display = 'none';
+
         const clearBtn = document.createElement('button');
         clearBtn.innerHTML = '&#x2715;'; 
         clearBtn.className = 'ns-filter-clear';
@@ -107,10 +131,20 @@ if (!window.__nsFilterExtensionLoaded) {
         clearBtn.type = 'button';
         clearBtn.title = 'Limpiar búsqueda';
 
+        let debounceTimer;
         input.addEventListener('input', (e) => {
-            const dropdown = container.closest(DROPDOWN_SELECTORS) || document.body;
-            applyFilter(e.target.value, dropdown);
-            clearBtn.style.display = e.target.value ? 'block' : 'none';
+            clearTimeout(debounceTimer);
+            const val = e.target.value;
+            clearBtn.style.display = val ? 'block' : 'none';
+            counter.style.display = val ? 'block' : 'none';
+            counter.textContent = 'Buscando...';
+            
+            debounceTimer = setTimeout(() => {
+                requestAnimationFrame(() => {
+                    const dropdown = container.closest(DROPDOWN_SELECTORS) || document.body;
+                    applyFilter(val, dropdown);
+                });
+            }, 150); // Mínimo retardo para no frizar UI tipiando rápido
         });
 
         clearBtn.addEventListener('click', (e) => {
@@ -119,10 +153,12 @@ if (!window.__nsFilterExtensionLoaded) {
             const dropdown = container.closest(DROPDOWN_SELECTORS) || document.body;
             applyFilter('', dropdown);
             clearBtn.style.display = 'none';
+            counter.style.display = 'none';
             input.focus();
         });
         
         wrapper.appendChild(input);
+        wrapper.appendChild(counter);
         wrapper.appendChild(clearBtn);
         container.appendChild(wrapper);
         
@@ -131,12 +167,69 @@ if (!window.__nsFilterExtensionLoaded) {
         return container;
     }
 
+    // Recursivo: quita los highlights previos devolviendo a texto puro
+    function removeHighlights(node) {
+        if (!node) return;
+        const highlights = node.querySelectorAll('.ns-highlight');
+        highlights.forEach(h => {
+            const parent = h.parentNode;
+            parent.replaceChild(document.createTextNode(h.textContent), h);
+            parent.normalize(); 
+        });
+    }
+
+    // Recursivo: resalta sobre nodos de texto sin romper html interno
+    function addHighlights(node, terms) {
+        if (!node || terms.length === 0) return;
+        if (node.nodeType === 3) { // TEXT_NODE
+            const textContent = node.nodeValue;
+            const lowerText = textContent.toLowerCase();
+            
+            // Buscar la primera coincidencia de cualquiera de los términos
+            let firstMatch = null;
+            let matchIndex = -1;
+            for (const term of terms) {
+                const idx = lowerText.indexOf(term);
+                if (idx !== -1 && (matchIndex === -1 || idx < matchIndex)) {
+                    matchIndex = idx;
+                    firstMatch = term;
+                }
+            }
+
+            if (firstMatch) {
+                const matchLen = firstMatch.length;
+                const beforeMatch = textContent.slice(0, matchIndex);
+                const matchText = textContent.slice(matchIndex, matchIndex + matchLen);
+                const afterMatch = textContent.slice(matchIndex + matchLen);
+
+                const fragment = document.createDocumentFragment();
+                if (beforeMatch) fragment.appendChild(document.createTextNode(beforeMatch));
+                
+                const span = document.createElement('span');
+                span.className = 'ns-highlight';
+                span.textContent = matchText;
+                fragment.appendChild(span);
+                
+                if (afterMatch) {
+                    const afterNode = document.createTextNode(afterMatch);
+                    fragment.appendChild(afterNode);
+                    node.parentNode.replaceChild(fragment, node);
+                    // Recursividad obligada en la cola sobrante
+                    addHighlights(afterNode, terms);
+                } else {
+                    node.parentNode.replaceChild(fragment, node);
+                }
+            }
+        } else if (node.nodeType === 1 && node.nodeName !== 'SCRIPT' && node.nodeName !== 'STYLE') {
+            Array.from(node.childNodes).forEach(child => addHighlights(child, terms));
+        }
+    }
+
     function applyFilter(term, contextNode = document.body) {
-        term = term.toLowerCase();
+        const terms = term.trim().toLowerCase().split(/\s+/).filter(t => t);
         let elementsToFilter = [];
         
         if (contextNode !== document.body) {
-            // Filtrado estricto dentro del dropdown
             const allInnerElems = contextNode.querySelectorAll('div, tr, li, .dropdown-row');
             elementsToFilter = Array.from(allInnerElems).filter(el => {
                 if (el.id === 'ns-filter-container' || el.closest('#ns-filter-container')) return false;
@@ -148,19 +241,50 @@ if (!window.__nsFilterExtensionLoaded) {
             elementsToFilter = Array.from(contextNode.querySelectorAll(tableSelectors));
         }
         
+        let matchCount = 0;
+        let insertionRowCount = 0;
+
         elementsToFilter.forEach(el => {
             if (!el) return;
             if (el.id === 'ns-filter-container' || el.closest('#ns-filter-container')) return;
 
             const elId = el.id || "";
+            // Restaurar estilo e intentar purgar highlights viejos antes de evaluar
+            removeHighlights(el);
+
             if (elId.endsWith('_addedit') || el.classList.contains('uir-machine-addrow')) {
                 el.style.display = "";
+                insertionRowCount++;
                 return;
             }
 
-            const text = el.innerText.toLowerCase();
-            el.style.display = text.includes(term) ? "" : "none";
+            if (terms.length === 0) {
+                el.style.display = "";
+                matchCount++;
+                return;
+            }
+
+            // Búsqueda multi-criteriod: innerText visible + title oculto + possible id data
+            const searchableText = (el.innerText + ' ' + (el.getAttribute('title') || '') + ' ' + elId).toLowerCase();
+            const isMatch = terms.every(t => searchableText.includes(t));
+
+            el.style.display = isMatch ? "" : "none";
+            
+            if (isMatch) {
+                matchCount++;
+                addHighlights(el, terms);
+            }
         });
+
+        // Actualizar contador
+        const counter = document.getElementById('ns-filter-counter');
+        if (counter) {
+            if (terms.length > 0) {
+                counter.textContent = `${matchCount} resultado${matchCount !== 1 ? 's' : ''}`;
+            } else {
+                counter.textContent = '';
+            }
+        }
     }
 
     function init() {
