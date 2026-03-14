@@ -225,11 +225,11 @@ if (!window.__nsFilterExtensionLoaded) {
         }
     }
 
-    let globalAliasMap = null;
+    let globalAliasMap = [];
 
     // Escanea todos los selects ocultos y atributos de la página para mapear "Nombres de Interfaz" -> "Internal IDs"
     function buildAliasMap() {
-        globalAliasMap = {};
+        globalAliasMap = [];
         
         // 1. Mapear desde Selects ocultos estándar
         const options = document.querySelectorAll('option');
@@ -238,9 +238,11 @@ if (!window.__nsFilterExtensionLoaded) {
             const text = opt.text;
             const value = opt.value;
             if (text && value) {
-                const textKey = text.trim().toLowerCase();
-                if (!globalAliasMap[textKey]) globalAliasMap[textKey] = new Set();
-                globalAliasMap[textKey].add(value.toLowerCase());
+                const textClean = text.replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
+                const valClean = value.replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
+                if (textClean && valClean) {
+                    globalAliasMap.push({ text: textClean, value: valClean });
+                }
             }
         }
     }
@@ -279,7 +281,7 @@ if (!window.__nsFilterExtensionLoaded) {
         const terms = term.trim().toLowerCase().split(/\s+/).filter(t => t);
         let elementsToFilter = [];
         
-        if (!globalAliasMap) buildAliasMap();
+        buildAliasMap(); // Siempre reconstruir, asegura atrapar options inyectados por peticiones asincronas
         
         if (contextNode !== document.body) {
             const allInnerElems = contextNode.querySelectorAll('div, tr, li, .dropdown-row');
@@ -316,14 +318,15 @@ if (!window.__nsFilterExtensionLoaded) {
                 return;
             }
 
-            // Agarrar texto base y quitarle paréntesis para limpieza de IDs ej: "Customer (entityid)" -> "customer entityid"
-            const rawText = el.textContent.trim().toLowerCase();
+            // Agarrar texto base asegurando limpieza agresiva de saltos de línea y nbsp ocultos
+            const rawText = el.textContent.replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
             const textBase = rawText.replace(/[()]/g, ' ');
             
-            // Buscar si el texto visualizado mapea nativamente hacia uno o más ID internos de NetSuite
+            // Buscar si el texto visualizado mapea parcialmente hacia uno o más ID internos vinculados (iterando Array)
             let aliasText = '';
-            if (globalAliasMap[rawText]) {
-                aliasText = Array.from(globalAliasMap[rawText]).join(' ');
+            const matchedAliases = globalAliasMap.filter(opt => rawText.includes(opt.text) || opt.text.includes(rawText));
+            if (matchedAliases.length > 0) {
+                aliasText = matchedAliases.map(opt => opt.value).join(' ');
             }
 
             // Atributos y Eventos ocultos
