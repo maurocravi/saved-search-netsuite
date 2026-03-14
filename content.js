@@ -250,7 +250,7 @@ if (!window.__nsFilterExtensionLoaded) {
         let data = new Set();
         const walk = (n) => {
             if (n.nodeType === 1) {
-                ['id', 'value', 'data-value', 'name', 'title', 'onmousedown', 'onclick'].forEach(attr => {
+                ['id', 'value', 'data-value', 'data-id', 'name', 'title', 'onmousedown', 'onclick'].forEach(attr => {
                     const val = n.getAttribute(attr);
                     if (val) {
                         data.add(val.toLowerCase());
@@ -316,22 +316,25 @@ if (!window.__nsFilterExtensionLoaded) {
                 return;
             }
 
-            // Agarrar texto base asegurando captar spans ocultos mediante textContent
-            const textBase = el.textContent.trim().toLowerCase();
+            // Agarrar texto base y quitarle paréntesis para limpieza de IDs ej: "Customer (entityid)" -> "customer entityid"
+            const rawText = el.textContent.trim().toLowerCase();
+            const textBase = rawText.replace(/[()]/g, ' ');
             
             // Buscar si el texto visualizado mapea nativamente hacia uno o más ID internos de NetSuite
             let aliasText = '';
-            if (globalAliasMap[textBase]) {
-                aliasText = Array.from(globalAliasMap[textBase]).join(' ');
+            if (globalAliasMap[rawText]) {
+                aliasText = Array.from(globalAliasMap[rawText]).join(' ');
             }
 
             // Atributos y Eventos ocultos
-            const hiddenData = getHiddenData(el).toLowerCase();
+            const hiddenData = getHiddenData(el).toLowerCase().replace(/[()]/g, ' ');
 
-            // Combinar todos los vectores de búsqueda en un macro string eficiente
-            const searchableText = (textBase + ' ' + aliasText + ' ' + hiddenData + ' ' + elId).toLowerCase();
+            // Combinar todos los vectores de búsqueda en un macro string eficiente. 
+            // Al estar todos concatenados, si pones un término y coincide con Name OR con ID, lo encuentra.
+            const searchableText = (textBase + ' ' + aliasText + ' ' + hiddenData + ' ' + elId.replace(/[()]/g, ' ')).toLowerCase();
             
-            // Requerir coincidencia exacta tipo AND
+            // Requerir coincidencia exacta tipo AND para las palabras de la búsqueda, 
+            // pero que dichas palabras puedan estar sobre CUALQUIER elemento del OR (Texto, Titulo, o ID)
             const isMatch = terms.every(t => searchableText.includes(t));
 
             el.style.display = isMatch ? "" : "none";
@@ -339,6 +342,14 @@ if (!window.__nsFilterExtensionLoaded) {
             if (isMatch) {
                 matchCount++;
                 addHighlights(el, terms);
+                // Debug console.log (SOLO para coincidencias, para no saturar 5000 lineas, o lo mostramos para los primeros 3)
+                if (matchCount <= 5) {
+                    console.log(`[NetSuite Extension Debug] Coincidencia #${matchCount}:`, {
+                        texto_limpio: textBase, 
+                        ids_ocultos_o_alias: (aliasText + ' ' + hiddenData).trim(),
+                        buscado_con: terms.join(' ')
+                    });
+                }
             }
         });
 
