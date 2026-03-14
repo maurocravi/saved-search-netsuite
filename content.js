@@ -227,9 +227,11 @@ if (!window.__nsFilterExtensionLoaded) {
 
     let globalAliasMap = null;
 
-    // Escanea todos los selects ocultos en la página de NetSuite para mapear "Nombres de Interfaz" -> "Internal IDs"
+    // Escanea todos los selects ocultos y atributos de la página para mapear "Nombres de Interfaz" -> "Internal IDs"
     function buildAliasMap() {
         globalAliasMap = {};
+        
+        // 1. Mapear desde Selects ocultos estándar
         const options = document.querySelectorAll('option');
         for (let i = 0; i < options.length; i++) {
             const opt = options[i];
@@ -243,14 +245,25 @@ if (!window.__nsFilterExtensionLoaded) {
         }
     }
 
-    // Extraedor profundo de atributos ocultos sin disparar reflows pesados
+    // Extraedor profundo de atributos ocultos: Busca valores dentro de eventos JS como fieldhelp.nl?f=entityid
     function getHiddenData(node) {
-        let data = [];
+        let data = new Set();
         const walk = (n) => {
             if (n.nodeType === 1) {
                 ['id', 'value', 'data-value', 'name', 'title', 'onmousedown', 'onclick'].forEach(attr => {
                     const val = n.getAttribute(attr);
-                    if (val) data.push(val);
+                    if (val) {
+                        data.add(val.toLowerCase());
+                        
+                        // Extracción heurística rigurosa: Si el atributo es un evento JS que abre un popup de ayuda de NetSuite
+                        // Ej: nsapiShowFieldHelp('.../fieldhelp.nl?f=entityid&...')
+                        if (attr === 'onclick' || attr === 'onmousedown') {
+                            const helpMatch = val.match(/[?&]f=([^&']+)/i);
+                            if (helpMatch && helpMatch[1]) {
+                                data.add(helpMatch[1].toLowerCase());
+                            }
+                        }
+                    }
                 });
                 const children = n.children;
                 for (let i = 0; i < children.length; i++) {
@@ -259,7 +272,7 @@ if (!window.__nsFilterExtensionLoaded) {
             }
         };
         walk(node);
-        return data.join(' ');
+        return Array.from(data).join(' ');
     }
 
     function applyFilter(term, contextNode = document.body) {
