@@ -227,51 +227,11 @@ if (!window.__nsFilterExtensionLoaded) {
 
     let globalAliasMap = [];
 
+    // Ahora el mapeo se delega al puente asíncrono (Main World Injection)
     function buildAliasMap() {
-        globalAliasMap = [];
-        
-        // 1. Extraer de selects clásicos (por si NetSuite decide usarlos en alguna pestaña)
-        document.querySelectorAll('option').forEach(opt => {
-            if (opt.text && opt.value) {
-                const textClean = opt.text.replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
-                const valClean = opt.value.replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
-                if (textClean && valClean) globalAliasMap.push({ text: textClean, value: valClean });
-            }
-        });
-
-        // 2. Extracción profunda: Leer el JS inyectado por NetSuite en la página
-        const scripts = document.querySelectorAll('script:not([src])'); // Solo scripts integrados
-        
-        // NetSuite suele inyectar opciones de dos formas:
-        // A: addSelectOption(elemento, 'Internal ID', 'Nombre Visible', ...)
-        const regexAdd = /addSelectOption\s*\([^,]+,\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]/g;
-        // B: Arrays estáticos de definición ["internalid", "Nombre"]
-        const regexArray = /\[\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]/g;
-
-        scripts.forEach(script => {
-            const content = script.textContent;
-            if (!content) return;
-            
-            let match;
-            
-            // Extraer de addSelectOption
-            while ((match = regexAdd.exec(content)) !== null) {
-                const valClean = match[1].trim().toLowerCase();
-                const textClean = match[2].replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
-                if (valClean.length > 1 && textClean) {
-                    globalAliasMap.push({ text: textClean, value: valClean });
-                }
-            }
-            
-            // Extraer de Arrays
-            while ((match = regexArray.exec(content)) !== null) {
-                const valClean = match[1].trim().toLowerCase();
-                const textClean = match[2].replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
-                if (valClean.length > 1 && textClean) {
-                    globalAliasMap.push({ text: textClean, value: valClean });
-                }
-            }
-        });
+        if (globalAliasMap.length === 0) {
+            console.log("[NetSuite Extension] Esperando datos del puente de inyección asincróno (NS_DICT_DATA)...");
+        }
     }
 
     // Extraedor profundo de atributos ocultos: Busca valores dentro de eventos JS como fieldhelp.nl?f=entityid
@@ -396,6 +356,61 @@ if (!window.__nsFilterExtensionLoaded) {
 
     function init() {
         console.log("Extensión NetSuite cargada: Motor de Filtrado Optimizado");
+        
+        // ==========================================
+        // ESPIA DEL MAIN WORLD (Detección de Arrays Globales de NetSuite)
+        // ==========================================
+        window.addEventListener('message', function(event) {
+            // Recibir los datos del script espía inyectado
+            if (event.source === window && event.data && event.data.type === 'NS_DICT_DATA') {
+                globalAliasMap = event.data.payload;
+                console.log(`[NetSuite Extension] Recibidos ${globalAliasMap.length} alias de campos desde NetSuite Global Window.`);
+            }
+        });
+
+        // Inyectamos un script que corra en el contexto de la página nativa
+        const spyScript = document.createElement('script');
+        spyScript.textContent = `
+            (function() {
+                try {
+                    console.log("[NetSuite Extension] Iniciando extractor Main World...");
+                    let localMap = [];
+                    // Iterar todo el objeto nativo global
+                    for (let key in window) {
+                        try {
+                            if (key === 'webkit' || key === 'top' || key === 'parent' || key === 'frames' || key === 'window' || key === 'document') continue;
+                            const obj = window[key];
+                            if (Array.isArray(obj) && obj.length > 10) {
+                                // Revisamos si la estructura parece el diccionario de opciones de NetSuite: [['id', 'name'], ...]
+                                if (Array.isArray(obj[0]) && obj[0].length >= 2 && typeof obj[0][0] === 'string' && typeof obj[0][1] === 'string') {
+                                    for (let i = 0; i < obj.length; i++) {
+                                        const pair = obj[i];
+                                        if (Array.isArray(pair) && pair.length >= 2) {
+                                            const valClean = pair[0].toString().replace(/[\\s\\u00A0]+/g, ' ').trim().toLowerCase();
+                                            const textClean = pair[1].toString().replace(/[\\s\\u00A0]+/g, ' ').trim().toLowerCase();
+                                            if (valClean && textClean) {
+                                                localMap.push({ text: textClean, value: valClean });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } catch(innerErr) {
+                            // Ignorar propiedades protegidas o cross-origin
+                        }
+                    }
+                    if (localMap.length > 0) {
+                        window.postMessage({ type: 'NS_DICT_DATA', payload: localMap }, '*');
+                    }
+                } catch(e) {
+                    console.error("[NetSuite Extension] Error en inyección Main World:", e);
+                }
+            })();
+        `;
+        document.documentElement.appendChild(spyScript);
+        // Limpiamos el nodo tras ejecutar para no dejar basura en el DOM
+        spyScript.remove();
+
         injectStyles();
         const searchContainer = getOrCreateSearchContainer();
         const searchInput = document.getElementById('ns-filter-search-input');
