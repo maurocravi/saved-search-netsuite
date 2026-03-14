@@ -1,11 +1,12 @@
 // Polyfill fallback por si el scope se aísla
 const extBrowser = typeof browser !== 'undefined' ? browser : chrome;
 
-// Evitar inicializaciones duplicadas en single-page applications o hot reloads múltiples
 if (!window.__nsFilterExtensionLoaded) {
     window.__nsFilterExtensionLoaded = true;
 
-    // Clases CSS con truco de :focus-within para mantener vivo el dropdown de NetSuite
+    // Remove any leftover containers from previous extension reloads in development
+    document.querySelectorAll('#ns-filter-container').forEach(el => el.remove());
+
     const TAILWIND_STYLES = `
     .ns-filter-container {
         display: none; 
@@ -53,8 +54,8 @@ if (!window.__nsFilterExtensionLoaded) {
     .ns-filter-clear:hover {
         color: #4b5563;
     }
-    /* Mágico: Si el usuario enfoca nuestro input, forzamos a NetSuite a mantener visible la caja evitando que el evento 'blur' colapse todo */
-    .ns-dropdown-active:focus-within {
+    /* Estilos forzados para anular la ocultación de NetSuite */
+    .ns-dropdown-locked {
         display: block !important;
         visibility: visible !important;
     }
@@ -64,17 +65,8 @@ if (!window.__nsFilterExtensionLoaded) {
         '.uir-field-choices',
         '.dropdownDiv',
         '.listboxcontainer',
-        '.uir-select-popup',
-        '[id^="dropdown_"]',
-        'div[id*="dropdown"]',
-        'div[class*="dropdown"]'
+        '.ns-dropdown'
     ].join(', ');
-
-    function isDropdownNode(node) {
-        if (node.nodeType !== 1) return false;
-        if (node.id === 'ns-filter-container') return false;
-        return node.matches && node.matches(DROPDOWN_SELECTORS);
-    }
 
     function injectStyles() {
         if (document.getElementById('ns-filter-styles')) return;
@@ -99,7 +91,14 @@ if (!window.__nsFilterExtensionLoaded) {
         input.placeholder = "Filtrar opciones...";
         input.className = "ns-filter-input";
         
+        // Detener eventos para prevenir que NetSuite capture el tipeo
         input.addEventListener('keydown', (e) => e.stopPropagation());
+        input.addEventListener('keypress', (e) => e.stopPropagation());
+        input.addEventListener('keyup', (e) => e.stopPropagation());
+        
+        // Prevenir que un click dentro del input cierre el menu
+        input.addEventListener('mousedown', (e) => e.stopPropagation());
+        input.addEventListener('click', (e) => e.stopPropagation());
         
         const clearBtn = document.createElement('button');
         clearBtn.innerHTML = '&#x2715;'; 
@@ -114,7 +113,8 @@ if (!window.__nsFilterExtensionLoaded) {
             clearBtn.style.display = e.target.value ? 'block' : 'none';
         });
 
-        clearBtn.addEventListener('click', () => {
+        clearBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
             input.value = '';
             const dropdown = container.closest(DROPDOWN_SELECTORS) || document.body;
             applyFilter('', dropdown);
@@ -127,7 +127,7 @@ if (!window.__nsFilterExtensionLoaded) {
         container.appendChild(wrapper);
         
         window.__nsSearchContainer = container;
-        document.body.appendChild(container);
+        document.body.appendChild(container); // Lo dejamos oculto en el root
         return container;
     }
 
@@ -135,7 +135,8 @@ if (!window.__nsFilterExtensionLoaded) {
         term = term.toLowerCase();
         let elementsToFilter = [];
         
-        if (contextNode !== document.body && contextNode.matches(DROPDOWN_SELECTORS)) {
+        if (contextNode !== document.body) {
+            // Filtrado estricto dentro del dropdown
             const allInnerElems = contextNode.querySelectorAll('div, tr, li, .dropdown-row');
             elementsToFilter = Array.from(allInnerElems).filter(el => {
                 if (el.id === 'ns-filter-container' || el.closest('#ns-filter-container')) return false;
@@ -163,101 +164,129 @@ if (!window.__nsFilterExtensionLoaded) {
     }
 
     function init() {
-        console.log("Extensión NetSuite cargada de forma segura - Inicializando observadores");
+        console.log("Extensión NetSuite cargada: Motor de Filtrado Optimizado");
         injectStyles();
         const searchContainer = getOrCreateSearchContainer();
         const searchInput = document.getElementById('ns-filter-search-input');
-        let activeDropdown = null;
         
+        let activeDropdown = null;
+        let isDropdownLocked = false;
+        
+        // Anti-Cierre: Un observador exclusivamente para el dropdown activo, para evitar que NetSuite lo cierre
+        const stateGuardian = new MutationObserver((mutations) => {
+            if (!activeDropdown || !isDropdownLocked) return;
+            for (let m of mutations) {
+                if (m.type === 'attributes' && (m.attributeName === 'style' || m.attributeName === 'class')) {
+                    if (activeDropdown.style.display === 'none' || activeDropdown.style.visibility === 'hidden') {
+                        // NetSuite intentó cerrarlo. Si estamos enfocados en la búsqueda, lo reabrimos a la fuerza.
+                        if (document.activeElement === searchInput || searchContainer.contains(document.activeElement)) {
+                            activeDropdown.classList.add('ns-dropdown-locked');
+                        }
+                    }
+                }
+            }
+        });
+
         function injectIntoDropdown(node) {
             if (activeDropdown === node && searchContainer.parentNode === node) return;
             
-            const style = window.getComputedStyle(node);
-            if (style.display === 'none' || style.visibility === 'hidden') return;
+            // Comprobar que realmente es visible (ancho/alto > 0 indica que está pintado)
+            const rect = node.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) return;
 
+            // Desvincular de dropdown anterior
+            stateGuardian.disconnect();
+            
             activeDropdown = node;
-            activeDropdown.classList.add('ns-dropdown-active'); 
             activeDropdown.prepend(searchContainer);
             searchContainer.style.display = 'block';
             searchInput.value = '';
             applyFilter('', activeDropdown);
             
+            isDropdownLocked = true;
+            activeDropdown.classList.add('ns-dropdown-locked');
+
+            stateGuardian.observe(activeDropdown, { attributes: true, attributeFilter: ['style', 'class'] });
+
             setTimeout(() => {
                 searchInput.focus();
-            }, 50);
+            }, 10);
         }
 
         function closeDropdown() {
-            searchContainer.style.display = 'none';
-            document.body.appendChild(searchContainer); // Salvaguardar contenedor reseteándolo al body
             if (activeDropdown) {
-                activeDropdown.classList.remove('ns-dropdown-active');
+                activeDropdown.classList.remove('ns-dropdown-locked');
+                stateGuardian.disconnect();
             }
+            searchContainer.style.display = 'none';
+            document.body.appendChild(searchContainer); 
             activeDropdown = null;
+            isDropdownLocked = false;
         }
 
-        const observer = new MutationObserver((mutations) => {
-            for (const mutation of mutations) {
-                if (mutation.type === 'childList') {
-                    mutation.addedNodes.forEach(node => {
-                        if (isDropdownNode(node)) {
-                            injectIntoDropdown(node);
-                        } else if (node.nodeType === 1) {
-                            const subDrops = node.querySelectorAll(DROPDOWN_SELECTORS);
-                            subDrops.forEach(injectIntoDropdown);
-                        }
-                    });
-                }
-                if (mutation.type === 'attributes' && (mutation.attributeName === 'style' || mutation.attributeName === 'class')) {
-                    const node = mutation.target;
-                    if (isDropdownNode(node)) {
-                        const style = window.getComputedStyle(node);
-                        const isVisible = style.display !== 'none' && style.visibility !== 'hidden';
-                        
-                        // Si NetSuite aplica estilos inline explícitos para ocultarlo, debemos soltar el seguro de :focus-within
-                        const isInlineHidden = node.style.display === 'none' || node.style.visibility === 'hidden';
-                        
-                        if (isVisible && !isInlineHidden) {
-                            injectIntoDropdown(node);
-                        } else if ((!isVisible || isInlineHidden) && activeDropdown === node) {
-                            closeDropdown();
-                        }
+        // Buscar en el DOM y determinar si debemos inyectar
+        function scanForVisibleDropdowns() {
+            const dropdowns = document.querySelectorAll(DROPDOWN_SELECTORS);
+            let foundVisible = false;
+            
+            for (let i = 0; i < dropdowns.length; i++) {
+                const node = dropdowns[i];
+                if (node.id === 'ns-filter-container') continue;
+                
+                const rect = node.getBoundingClientRect();
+                if (rect.width > 0 && rect.height > 0) {
+                    foundVisible = true;
+                    if (activeDropdown !== node) {
+                        injectIntoDropdown(node);
                     }
+                    break;
                 }
+            }
+            
+            if (!foundVisible && activeDropdown) {
+                // Si el usuario da clic fuera legítimamente, cerramos el lock de NetSuite
+                closeDropdown();
+            }
+        }
+
+        // Observador global ultraligero: solo vigila inserciones en el DOM (no style/class) para no colgar Firefox
+        const domObserver = new MutationObserver((mutations) => {
+            let hasAddedElement = false;
+            for (let m of mutations) {
+                if (m.addedNodes.length > 0) {
+                    hasAddedElement = true;
+                    break;
+                }
+            }
+            if (hasAddedElement) {
+                requestAnimationFrame(scanForVisibleDropdowns);
             }
         });
 
-        observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
+        domObserver.observe(document.body, { childList: true, subtree: true });
 
-        // Respaldo de seguridad en caso de que un clíc abra un repintado asíncrono invisible al observer inicial
+        // Eventos nativos robustos
         document.addEventListener('mousedown', (e) => {
             if (e.target.closest('#ns-filter-container')) return;
             
-            setTimeout(() => {
-                const dropdowns = document.querySelectorAll(DROPDOWN_SELECTORS);
-                for (let node of dropdowns) {
-                    if (node.id === 'ns-filter-container') continue;
-                    const style = window.getComputedStyle(node);
-                    const isInlineHidden = node.style.display === 'none' || node.style.visibility === 'hidden';
-                    
-                    if (style.display !== 'none' && style.visibility !== 'hidden' && !isInlineHidden) {
-                        injectIntoDropdown(node);
-                        break;
-                    }
-                }
-            }, 100);
-        });
+            // NetSuite muestra el panel en la fase asíncrona tras el mousedown
+            setTimeout(scanForVisibleDropdowns, 50);
+            setTimeout(scanForVisibleDropdowns, 200);
+            
+            // Si el user hace clic en otro lado, quitamos el lock global
+            if (activeDropdown && !activeDropdown.contains(e.target)) {
+                closeDropdown();
+            }
+        }, true); // Captura fase para asegurar prelación
     }
 
-    // Comprobación SPA defensiva. Asegurar que init solo ruede una vez.
-    setInterval(() => {
+    // Comprobación SPA inicial (arranca una sola vez de forma estricta)
+    const bootCheck = setInterval(() => {
         if (window.location.pathname.includes('app/common/search/search.nl')) {
             if (!window.__nsFilterInitDone) {
                 window.__nsFilterInitDone = true;
+                clearInterval(bootCheck);
                 init();
-            } else if (!document.getElementById('ns-filter-container') && window.__nsSearchContainer) {
-                // Si NetSuite reescribió el sub-DOM destructivamente, lo re-anclamos al Body
-                document.body.appendChild(window.__nsSearchContainer);
             }
         }
     }, 1000);
