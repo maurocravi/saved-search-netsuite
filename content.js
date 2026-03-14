@@ -373,34 +373,71 @@ if (!window.__nsFilterExtensionLoaded) {
         spyScript.textContent = `
             (function() {
                 try {
-                    console.log("[NetSuite Extension] Iniciando extractor Main World...");
+                    console.log("[NetSuite Extension] Iniciando extractor Main World dirigido a NS y _dynamicData...");
                     let localMap = [];
-                    // Iterar todo el objeto nativo global
-                    for (let key in window) {
-                        try {
-                            if (key === 'webkit' || key === 'top' || key === 'parent' || key === 'frames' || key === 'window' || key === 'document') continue;
-                            const obj = window[key];
-                            if (Array.isArray(obj) && obj.length > 10) {
-                                // Revisamos si la estructura parece el diccionario de opciones de NetSuite: [['id', 'name'], ...]
-                                if (Array.isArray(obj[0]) && obj[0].length >= 2 && typeof obj[0][0] === 'string' && typeof obj[0][1] === 'string') {
-                                    for (let i = 0; i < obj.length; i++) {
-                                        const pair = obj[i];
-                                        if (Array.isArray(pair) && pair.length >= 2) {
-                                            const valClean = pair[0].toString().replace(/[\\s\\u00A0]+/g, ' ').trim().toLowerCase();
-                                            const textClean = pair[1].toString().replace(/[\\s\\u00A0]+/g, ' ').trim().toLowerCase();
-                                            if (valClean && textClean) {
-                                                localMap.push({ text: textClean, value: valClean });
-                                            }
-                                        }
-                                    }
+                    let seen = new Set();
+
+                    function extractFrom(obj) {
+                        if (!obj || typeof obj !== 'object') return;
+                        if (seen.has(obj)) return; // Evitar loops infinitos
+                        seen.add(obj);
+
+                        if (Array.isArray(obj)) {
+                            for (let i = 0; i < obj.length; i++) {
+                                let item = obj[i];
+                                // Detectar forma ['id', 'texto']
+                                if (Array.isArray(item) && item.length >= 2 && typeof item[0] === 'string' && typeof item[1] === 'string') {
+                                    localMap.push({ value: item[0], text: item[1] });
+                                } else {
+                                    extractFrom(item);
                                 }
                             }
-                        } catch(innerErr) {
-                            // Ignorar propiedades protegidas o cross-origin
+                        } else {
+                            // Buscar propiedades típicas de NetSuite para combos
+                            let val = obj.value || obj.id || obj.internalid;
+                            let txt = obj.text || obj.label || obj.name;
+                            
+                            if (typeof val === 'string' && typeof txt === 'string' && val.trim() !== '') {
+                                localMap.push({ value: val, text: txt });
+                            }
+                            
+                            // Entrar a las sub-propiedades
+                            for (let k in obj) {
+                                try {
+                                    if (Object.prototype.hasOwnProperty.call(obj, k)) {
+                                        extractFrom(obj[k]);
+                                    }
+                                } catch(e) {}
+                            }
                         }
                     }
-                    if (localMap.length > 0) {
-                        window.postMessage({ type: 'NS_DICT_DATA', payload: localMap }, '*');
+
+                    // Escanear solo las variables donde sabemos que está la data
+                    if (window.NS) extractFrom(window.NS);
+                    if (window._dynamicData) extractFrom(window._dynamicData);
+
+                    // Limpiar y filtrar resultados
+                    let finalMap = [];
+                    let uniqueIds = new Set();
+                    for (let item of localMap) {
+                        let v = item.value.replace(/[\\s\\u00A0]+/g, ' ').trim().toLowerCase();
+                        let t = item.text.replace(/[\\s\\u00A0]+/g, ' ').trim().toLowerCase();
+                        
+                        // Los IDs internos de NetSuite rara vez tienen espacios y miden más de 1 caracter
+                        if (v && t && !v.includes(' ') && v.length > 1) {
+                            let key = v + '|' + t;
+                            if (!uniqueIds.has(key)) {
+                                uniqueIds.add(key);
+                                finalMap.push({ value: v, text: t });
+                            }
+                        }
+                    }
+
+                    if (finalMap.length > 0) {
+                        console.log("[NetSuite Extension] Extracción exitosa. Enviando " + finalMap.length + " pares a la extensión.");
+                        window.postMessage({ type: 'NS_DICT_DATA', payload: finalMap }, '*');
+                    } else {
+                        console.log("[NetSuite Extension] No se encontraron datos útiles en el escaneo.");
                     }
                 } catch(e) {
                     console.error("[NetSuite Extension] Error en inyección Main World:", e);
