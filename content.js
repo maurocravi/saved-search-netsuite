@@ -6,9 +6,9 @@ const extBrowser = typeof browser !== 'undefined' ? browser : chrome;
 const TAILWIND_STYLES = `
 .ns-filter-container {
     position: fixed;   
-    top: 3.5rem;       /* Move down to avoid top button ribbon in NetSuite editor */
+    top: 5rem;         /* Move down to avoid top button ribbon in NetSuite editor */
     right: 2rem;       
-    z-index: 9999;
+    z-index: 2147483647;
     display: flex;
     align-items: center;
 }
@@ -101,9 +101,9 @@ function applyFilter(term) {
     term = term.toLowerCase();
     // ".uir-list-row-tr" captura filas de Results, Filters y cualquier otra tabla estándar.
     // En el modo edición, las sublistas también cargan bajo clases uir-machine-row o similares,
-    // pero NetSuite típicamente conserva usabilidad sobre uir-list-row-tr o uir-machine-row.
-    // Para las sublistas del editor de búsquedas (Criteria, Results), usamos 'tr.uir-list-row-tr, tr.uir-machine-row'.
-    const rows = document.querySelectorAll('tr.uir-list-row-tr, tr.uir-machine-row');
+    // Nos aseguramos de buscar en #filter_splits, #column_splits, o cualquier contenedor uir-machine-table.
+    const selectors = '.uir-machine-table tr.uir-list-row-tr, .uir-machine-table tr.uir-machine-row, #filter_splits tr, #column_splits tr, tr.uir-list-row-tr, tr.uir-machine-row';
+    const rows = document.querySelectorAll(selectors);
     
     rows.forEach(row => {
         // Preservar siempre la fila vacía de inserción (donde se añade un nuevo criterio/resultado)
@@ -124,11 +124,7 @@ function applyFilter(term) {
 }
 
 function init() {
-    // Validar el contexto: Ejecutar solo si estamos en la edición/creación de un Saved Search
-    if (!window.location.pathname.includes('app/common/search/search.nl')) {
-        return; 
-    }
-
+    console.log("Extensión NetSuite cargada en editor");
     injectStyles();
     const searchInput = getOrCreateSearchInput();
     
@@ -159,5 +155,12 @@ function init() {
     observer.observe(formContainer, { childList: true, subtree: true });
 }
 
-// Iniciar cuando el DOM se cargue
-window.addEventListener('load', init);
+// Iniciar usando comprobación recurrente para manejo dinámico
+setInterval(() => {
+    // Validar el contexto: Ejecutar solo si estamos en la edición/creación de un Saved Search
+    if (window.location.pathname.includes('app/common/search/search.nl')) {
+        if (!document.getElementById('ns-filter-container')) {
+            init();
+        }
+    }
+}, 1000);
