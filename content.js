@@ -225,44 +225,39 @@ if (!window.__nsFilterExtensionLoaded) {
         }
     }
 
-    let globalAliasMap = [];
     let fastAliasMap = new Map();
+    let mapBuilt = false;
 
-    // Ahora el mapeo se delega al puente asíncrono (Main World Injection)
     function buildAliasMap() {
-        if (globalAliasMap.length === 0) {
-            console.log("[NetSuite Extension] Esperando datos del puente de inyección asincróno (NS_DICT_DATA)...");
-        }
-    }
+        if (mapBuilt) return;
+        mapBuilt = true;
+        
+        const html = document.documentElement.innerHTML;
+        let count = 0;
 
-    // Extraedor profundo de atributos ocultos: Busca valores dentro de eventos JS como fieldhelp.nl?f=entityid
-    function getHiddenData(node) {
-        let data = new Set();
-        const walk = (n) => {
-            if (n.nodeType === 1) {
-                ['id', 'value', 'data-value', 'data-id', 'name', 'title', 'onmousedown', 'onclick'].forEach(attr => {
-                    const val = n.getAttribute(attr);
-                    if (val) {
-                        data.add(val.toLowerCase());
-                        
-                        // Extracción heurística rigurosa: Si el atributo es un evento JS que abre un popup de ayuda de NetSuite
-                        // Ej: nsapiShowFieldHelp('.../fieldhelp.nl?f=entityid&...')
-                        if (attr === 'onclick' || attr === 'onmousedown') {
-                            const helpMatch = val.match(/[?&]f=([^&']+)/i);
-                            if (helpMatch && helpMatch[1]) {
-                                data.add(helpMatch[1].toLowerCase());
-                            }
-                        }
-                    }
-                });
-                const children = n.children;
-                for (let i = 0; i < children.length; i++) {
-                    walk(children[i]);
-                }
+        // Regex 1: Detectar arrays estáticos ["internalid", "Label"]
+        const regex1 = /\[\s*['"]([a-z0-9_]{3,})['"]\s*,\s*(['"])(.*?)\2/gi;
+        let m;
+        while ((m = regex1.exec(html)) !== null) {
+            let id = m[1].toLowerCase();
+            let label = m[3].replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
+            if (label && id !== 'true' && id !== 'false') {
+                fastAliasMap.set(label, id);
+                count++;
             }
-        };
-        walk(node);
-        return Array.from(data).join(' ');
+        }
+        
+        // Regex 2: Detectar addSelectOption(..., 'internalid', 'Label')
+        const regex2 = /addSelectOption\s*\([^,]+,\s*['"]([a-z0-9_]{3,})['"]\s*,\s*(['"])(.*?)\2/gi;
+        while ((m = regex2.exec(html)) !== null) {
+            let id = m[1].toLowerCase();
+            let label = m[3].replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
+            if (label) {
+                fastAliasMap.set(label, id);
+                count++;
+            }
+        }
+        console.log(`[NetSuite Extension] Diccionario Regex construido con ${count} IDs ocultos.`);
     }
 
     function applyFilter(term, contextNode = document.body) {
@@ -310,18 +305,26 @@ if (!window.__nsFilterExtensionLoaded) {
             const rawText = el.textContent.replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
             const textBase = rawText.replace(/[()]/g, ' ').trim();
             
-            // Extracción instantánea sin loops anidados
-            let aliasText = fastAliasMap.get(rawText) || fastAliasMap.get(textBase) || '';
+            // CACHEO DE RENDIMIENTO (O(1)): Solo calcular el ID la primera vez
+            if (!el.hasAttribute('data-ns-id')) {
+                let id = fastAliasMap.get(rawText) || fastAliasMap.get(textBase);
+                
+                // Fallback por si la fila dice "Company Name (Custom)" y el map tiene "Company Name"
+                if (!id) {
+                    for (let [keyLabel, keyId] of fastAliasMap.entries()) {
+                        if (rawText.includes(keyLabel)) {
+                            id = keyId;
+                            break;
+                        }
+                    }
+                }
+                el.setAttribute('data-ns-id', id || 'unknown');
+            }
 
-            // Atributos y Eventos ocultos
-            const hiddenData = getHiddenData(el).toLowerCase().replace(/[()]/g, ' ');
-
-            // Combinar todos los vectores de búsqueda en un macro string eficiente. 
-            // Al estar todos concatenados, si pones un término y coincide con Name OR con ID, lo encuentra.
-            const searchableText = (textBase + ' ' + aliasText + ' ' + hiddenData + ' ' + elId.replace(/[()]/g, ' ')).toLowerCase();
+            const nsId = el.getAttribute('data-ns-id');
+            // Eliminar el uso de hiddenData anterior, solo confiar en el Regex exacto
+            const searchableText = (rawText + ' ' + textBase + ' ' + nsId).toLowerCase();
             
-            // Requerir coincidencia exacta tipo AND para las palabras de la búsqueda, 
-            // pero que dichas palabras puedan estar sobre CUALQUIER elemento del OR (Texto, Titulo, o ID)
             const isMatch = terms.every(t => searchableText.includes(t));
 
             el.style.display = isMatch ? "" : "none";
@@ -333,7 +336,7 @@ if (!window.__nsFilterExtensionLoaded) {
                 if (matchCount <= 5) {
                     console.log(`[NetSuite Extension Debug] Coincidencia #${matchCount}:`, {
                         texto_limpio: textBase, 
-                        ids_ocultos_o_alias: (aliasText + ' ' + hiddenData).trim(),
+                        ids_ocultos_o_alias: nsId !== 'unknown' ? nsId : '',
                         buscado_con: terms.join(' ')
                     });
                 }
@@ -354,101 +357,6 @@ if (!window.__nsFilterExtensionLoaded) {
     function init() {
         console.log("Extensión NetSuite cargada: Motor de Filtrado Optimizado");
         
-        // ==========================================
-        // ESPIA DEL MAIN WORLD (Detección de Arrays Globales de NetSuite)
-        // ==========================================
-        window.addEventListener('message', function(event) {
-            // Recibir los datos del script espía inyectado
-            if (event.source === window && event.data && event.data.type === 'NS_DICT_DATA') {
-                globalAliasMap = event.data.payload;
-                fastAliasMap.clear();
-                globalAliasMap.forEach(item => {
-                    fastAliasMap.set(item.text, item.value); // Clave exacta -> ID exacto
-                });
-                console.log(`[NetSuite Extension] Recibidos ${globalAliasMap.length} alias de campos desde NetSuite Global Window.`);
-            }
-        });
-
-        // Inyectamos un script que corra en el contexto de la página nativa
-        const spyScript = document.createElement('script');
-        spyScript.textContent = `
-            (function() {
-                try {
-                    console.log("[NetSuite Extension] Iniciando extractor Main World dirigido a NS y _dynamicData...");
-                    let localMap = [];
-                    let seen = new Set();
-
-                    function extractFrom(obj) {
-                        if (!obj || typeof obj !== 'object') return;
-                        if (seen.has(obj)) return; // Evitar loops infinitos
-                        seen.add(obj);
-
-                        if (Array.isArray(obj)) {
-                            for (let i = 0; i < obj.length; i++) {
-                                let item = obj[i];
-                                // Detectar forma ['id', 'texto']
-                                if (Array.isArray(item) && item.length >= 2 && typeof item[0] === 'string' && typeof item[1] === 'string') {
-                                    localMap.push({ value: item[0], text: item[1] });
-                                } else {
-                                    extractFrom(item);
-                                }
-                            }
-                        } else {
-                            // Buscar propiedades típicas de NetSuite para combos
-                            let val = obj.value || obj.id || obj.internalid;
-                            let txt = obj.text || obj.label || obj.name;
-                            
-                            if (typeof val === 'string' && typeof txt === 'string' && val.trim() !== '') {
-                                localMap.push({ value: val, text: txt });
-                            }
-                            
-                            // Entrar a las sub-propiedades
-                            for (let k in obj) {
-                                try {
-                                    if (Object.prototype.hasOwnProperty.call(obj, k)) {
-                                        extractFrom(obj[k]);
-                                    }
-                                } catch(e) {}
-                            }
-                        }
-                    }
-
-                    // Escanear solo las variables donde sabemos que está la data
-                    if (window.NS) extractFrom(window.NS);
-                    if (window._dynamicData) extractFrom(window._dynamicData);
-
-                    // Limpiar y filtrar resultados
-                    let finalMap = [];
-                    let uniqueIds = new Set();
-                    for (let item of localMap) {
-                        let v = item.value.replace(/[\\s\\u00A0]+/g, ' ').trim().toLowerCase();
-                        let t = item.text.replace(/[\\s\\u00A0]+/g, ' ').trim().toLowerCase();
-                        
-                        // Los IDs internos de NetSuite rara vez tienen espacios y miden más de 1 caracter
-                        if (v && t && !v.includes(' ') && v.length > 1) {
-                            let key = v + '|' + t;
-                            if (!uniqueIds.has(key)) {
-                                uniqueIds.add(key);
-                                finalMap.push({ value: v, text: t });
-                            }
-                        }
-                    }
-
-                    if (finalMap.length > 0) {
-                        console.log("[NetSuite Extension] Extracción exitosa. Enviando " + finalMap.length + " pares a la extensión.");
-                        window.postMessage({ type: 'NS_DICT_DATA', payload: finalMap }, '*');
-                    } else {
-                        console.log("[NetSuite Extension] No se encontraron datos útiles en el escaneo.");
-                    }
-                } catch(e) {
-                    console.error("[NetSuite Extension] Error en inyección Main World:", e);
-                }
-            })();
-        `;
-        document.documentElement.appendChild(spyScript);
-        // Limpiamos el nodo tras ejecutar para no dejar basura en el DOM
-        spyScript.remove();
-
         injectStyles();
         const searchContainer = getOrCreateSearchContainer();
         const searchInput = document.getElementById('ns-filter-search-input');
