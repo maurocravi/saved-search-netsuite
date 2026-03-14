@@ -227,24 +227,51 @@ if (!window.__nsFilterExtensionLoaded) {
 
     let globalAliasMap = [];
 
-    // Escanea todos los selects ocultos y atributos de la página para mapear "Nombres de Interfaz" -> "Internal IDs"
     function buildAliasMap() {
         globalAliasMap = [];
         
-        // 1. Mapear desde Selects ocultos estándar
-        const options = document.querySelectorAll('option');
-        for (let i = 0; i < options.length; i++) {
-            const opt = options[i];
-            const text = opt.text;
-            const value = opt.value;
-            if (text && value) {
-                const textClean = text.replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
-                const valClean = value.replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
-                if (textClean && valClean) {
+        // 1. Extraer de selects clásicos (por si NetSuite decide usarlos en alguna pestaña)
+        document.querySelectorAll('option').forEach(opt => {
+            if (opt.text && opt.value) {
+                const textClean = opt.text.replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
+                const valClean = opt.value.replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
+                if (textClean && valClean) globalAliasMap.push({ text: textClean, value: valClean });
+            }
+        });
+
+        // 2. Extracción profunda: Leer el JS inyectado por NetSuite en la página
+        const scripts = document.querySelectorAll('script:not([src])'); // Solo scripts integrados
+        
+        // NetSuite suele inyectar opciones de dos formas:
+        // A: addSelectOption(elemento, 'Internal ID', 'Nombre Visible', ...)
+        const regexAdd = /addSelectOption\s*\([^,]+,\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]/g;
+        // B: Arrays estáticos de definición ["internalid", "Nombre"]
+        const regexArray = /\[\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]/g;
+
+        scripts.forEach(script => {
+            const content = script.textContent;
+            if (!content) return;
+            
+            let match;
+            
+            // Extraer de addSelectOption
+            while ((match = regexAdd.exec(content)) !== null) {
+                const valClean = match[1].trim().toLowerCase();
+                const textClean = match[2].replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
+                if (valClean.length > 1 && textClean) {
                     globalAliasMap.push({ text: textClean, value: valClean });
                 }
             }
-        }
+            
+            // Extraer de Arrays
+            while ((match = regexArray.exec(content)) !== null) {
+                const valClean = match[1].trim().toLowerCase();
+                const textClean = match[2].replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
+                if (valClean.length > 1 && textClean) {
+                    globalAliasMap.push({ text: textClean, value: valClean });
+                }
+            }
+        });
     }
 
     // Extraedor profundo de atributos ocultos: Busca valores dentro de eventos JS como fieldhelp.nl?f=entityid
