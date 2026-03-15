@@ -271,7 +271,6 @@ if (!window.__nsFilterExtensionLoaded) {
         try {
             if (pageWindow.NS) extractFrom(pageWindow.NS, fastAliasMap);
             if (pageWindow._dynamicData) extractFrom(pageWindow._dynamicData, fastAliasMap);
-            console.log(`[NetSuite Extension Debug] Diccionario construido con ${fastAliasMap.size} IDs.`);
         } catch(e) {
             console.error("[NetSuite Extension] Error accediendo a variables globales:", e);
         }
@@ -280,8 +279,6 @@ if (!window.__nsFilterExtensionLoaded) {
     function applyFilter(term, contextNode = document.body) {
         const terms = term.trim().toLowerCase().split(/\s+/).filter(t => t);
         let elementsToFilter = [];
-        
-        buildAliasMap(); // Siempre reconstruir, asegura atrapar options inyectados por peticiones asincronas
         
         if (contextNode !== document.body) {
             const allInnerElems = contextNode.querySelectorAll('div, tr, li, .dropdown-row');
@@ -347,14 +344,6 @@ if (!window.__nsFilterExtensionLoaded) {
             if (isMatch) {
                 matchCount++;
                 addHighlights(el, terms);
-                // Debug console.log (SOLO para coincidencias, para no saturar 5000 lineas, o lo mostramos para los primeros 3)
-                if (matchCount <= 5) {
-                    console.log(`[NetSuite Extension Debug] Coincidencia #${matchCount}:`, {
-                        texto_limpio: textBase, 
-                        ids_ocultos_o_alias: nsId !== 'unknown' ? nsId : '',
-                        buscado_con: terms.join(' ')
-                    });
-                }
             }
         });
 
@@ -372,6 +361,7 @@ if (!window.__nsFilterExtensionLoaded) {
     function init() {
         console.log("Extensión NetSuite cargada: Motor de Filtrado Optimizado");
         
+        setTimeout(buildAliasMap, 1000);
         injectStyles();
         const searchContainer = getOrCreateSearchContainer();
         const searchInput = document.getElementById('ns-filter-search-input');
@@ -455,22 +445,6 @@ if (!window.__nsFilterExtensionLoaded) {
                 closeDropdown();
             }
         }
-
-        // Observador global ultraligero: solo vigila inserciones en el DOM (no style/class) para no colgar Firefox
-        const domObserver = new MutationObserver((mutations) => {
-            let hasAddedElement = false;
-            for (let m of mutations) {
-                if (m.addedNodes.length > 0) {
-                    hasAddedElement = true;
-                    break;
-                }
-            }
-            if (hasAddedElement) {
-                requestAnimationFrame(scanForVisibleDropdowns);
-            }
-        });
-
-        domObserver.observe(document.body, { childList: true, subtree: true });
 
         // Eventos nativos robustos
         document.addEventListener('mousedown', (e) => {
