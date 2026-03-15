@@ -227,52 +227,107 @@ if (!window.__nsFilterExtensionLoaded) {
 
     let fastAliasMap = new Map();
     let mapBuilt = false;
+    let mapBuildingInProgress = false;
+    let hasActiveHighlights = false; // Flag para skip de removeHighlights
 
-    function buildAliasMap() {
-        if (mapBuilt) return;
-        mapBuilt = true;
+    const MAX_WALK_DEPTH = 10; // Límite de profundidad para evitar recorrido infinito
+
+    function buildAliasMap(callback) {
+        if (mapBuilt) { if (callback) callback(); return; }
+        if (mapBuildingInProgress) { if (callback) callback(); return; }
+        mapBuildingInProgress = true;
         
-        function extractFrom(obj, targetMap) {
-            if (!obj || typeof obj !== 'object') return;
-            let seen = new Set();
-            
-            function walk(n) {
-                if (!n || typeof n !== 'object' || seen.has(n)) return;
-                seen.add(n);
-                
-                if (Array.isArray(n)) {
-                    for (let i = 0; i < n.length; i++) {
-                        let item = n[i];
-                        if (Array.isArray(item) && item.length >= 2 && typeof item[0] === 'string' && typeof item[1] === 'string') {
-                            let val = item[0].toLowerCase();
-                            let txt = item[1].replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
-                            if (val.length > 1) targetMap.set(txt, val);
-                        } else {
-                            walk(item);
-                        }
-                    }
-                } else {
-                    let val = n.value || n.id || n.internalid;
-                    let txt = n.text || n.label || n.name;
-                    if (typeof val === 'string' && typeof txt === 'string' && val.trim() !== '') {
-                        targetMap.set(txt.replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase(), val.toLowerCase());
-                    }
-                    for (let k in n) {
-                        try { walk(n[k]); } catch(e) {}
-                     }
-                }
-            }
-            walk(obj);
-        }
-
         // El secreto para Firefox: wrappedJSObject
         const pageWindow = typeof window.wrappedJSObject !== 'undefined' ? window.wrappedJSObject : window;
         
+        // Recopilar las raíces a explorar
+        const roots = [];
         try {
-            if (pageWindow.NS) extractFrom(pageWindow.NS, fastAliasMap);
-            if (pageWindow._dynamicData) extractFrom(pageWindow._dynamicData, fastAliasMap);
+            if (pageWindow.NS) roots.push(pageWindow.NS);
+            if (pageWindow._dynamicData) roots.push(pageWindow._dynamicData);
         } catch(e) {
             console.error("[NetSuite Extension] Error accediendo a variables globales:", e);
+        }
+
+        if (roots.length === 0) {
+            mapBuilt = true;
+            mapBuildingInProgress = false;
+            if (callback) callback();
+            return;
+        }
+
+        // Recolectar trabajo en una cola BFS con límite de profundidad
+        const seen = new Set();
+        const queue = [];
+        for (const root of roots) {
+            queue.push({ node: root, depth: 0 });
+        }
+
+        function processChunk(deadline) {
+            const hasIdleTime = typeof deadline !== 'undefined' && typeof deadline.timeRemaining === 'function';
+            const chunkLimit = 500; // Nodos por chunk si no hay idle API
+            let processed = 0;
+
+            while (queue.length > 0) {
+                // Ceder el hilo si se acabó el tiempo idle, o después de N nodos
+                if (hasIdleTime && deadline.timeRemaining() <= 0) break;
+                if (!hasIdleTime && processed >= chunkLimit) break;
+
+                const { node: n, depth } = queue.shift();
+                processed++;
+
+                if (!n || typeof n !== 'object' || seen.has(n) || depth > MAX_WALK_DEPTH) continue;
+                seen.add(n);
+
+                if (Array.isArray(n)) {
+                    for (let i = 0; i < n.length; i++) {
+                        const item = n[i];
+                        if (Array.isArray(item) && item.length >= 2 && typeof item[0] === 'string' && typeof item[1] === 'string') {
+                            const val = item[0].toLowerCase();
+                            const txt = item[1].replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
+                            if (val.length > 1) fastAliasMap.set(txt, val);
+                        } else {
+                            queue.push({ node: item, depth: depth + 1 });
+                        }
+                    }
+                } else {
+                    const val = n.value || n.id || n.internalid;
+                    const txt = n.text || n.label || n.name;
+                    if (typeof val === 'string' && typeof txt === 'string' && val.trim() !== '') {
+                        fastAliasMap.set(txt.replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase(), val.toLowerCase());
+                    }
+                    for (const k in n) {
+                        try {
+                            const child = n[k];
+                            if (child && typeof child === 'object') {
+                                queue.push({ node: child, depth: depth + 1 });
+                            }
+                        } catch(e) {}
+                    }
+                }
+            }
+
+            if (queue.length > 0) {
+                // Todavía hay trabajo, programar siguiente chunk
+                if (typeof requestIdleCallback === 'function') {
+                    requestIdleCallback(processChunk);
+                } else {
+                    setTimeout(() => processChunk({}), 0);
+                }
+            } else {
+                // Completado
+                mapBuilt = true;
+                mapBuildingInProgress = false;
+                console.log(`[NetSuite Extension] AliasMap construido: ${fastAliasMap.size} entradas`);
+                if (callback) callback();
+            }
+        }
+
+        // Iniciar procesamiento no-bloqueante
+        if (typeof requestIdleCallback === 'function') {
+            requestIdleCallback(processChunk);
+        } else {
+            setTimeout(() => processChunk({}), 0);
         }
     }
 
@@ -291,27 +346,36 @@ if (!window.__nsFilterExtensionLoaded) {
             const tableSelectors = '.uir-machine-table tr.uir-list-row-tr, .uir-machine-table tr.uir-machine-row, #filter_splits tr, #column_splits tr, tr.uir-list-row-tr, tr.uir-machine-row';
             elementsToFilter = Array.from(contextNode.querySelectorAll(tableSelectors));
         }
+
+        // Early-return rápido: cuando no hay términos, mostrar todo sin manipular DOM innecesariamente
+        if (terms.length === 0) {
+            // Solo limpiar highlights si los hay
+            if (hasActiveHighlights) {
+                elementsToFilter.forEach(el => removeHighlights(el));
+                hasActiveHighlights = false;
+            }
+            elementsToFilter.forEach(el => { el.style.display = ""; });
+            const counter = document.getElementById('ns-filter-counter');
+            if (counter) counter.textContent = '';
+            return;
+        }
         
         let matchCount = 0;
-        let insertionRowCount = 0;
+
+        // Solo remover highlights si hay activos
+        if (hasActiveHighlights) {
+            elementsToFilter.forEach(el => removeHighlights(el));
+            hasActiveHighlights = false;
+        }
 
         elementsToFilter.forEach(el => {
             if (!el) return;
             if (el.id === 'ns-filter-container' || el.closest('#ns-filter-container')) return;
 
             const elId = el.id || "";
-            // Restaurar estilo e intentar purgar highlights viejos antes de evaluar
-            removeHighlights(el);
 
             if (elId.endsWith('_addedit') || el.classList.contains('uir-machine-addrow')) {
                 el.style.display = "";
-                insertionRowCount++;
-                return;
-            }
-
-            if (terms.length === 0) {
-                el.style.display = "";
-                matchCount++;
                 return;
             }
 
@@ -319,24 +383,16 @@ if (!window.__nsFilterExtensionLoaded) {
             const rawText = el.textContent.replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
             const textBase = rawText.replace(/[()]/g, ' ').trim();
             
-            // Extraer ID nativo y cachearlo en el DOM
+            // Extraer ID nativo y cachearlo en el DOM — solo exact-match O(1)
             if (!el.hasAttribute('data-ns-id')) {
-                let id = fastAliasMap.get(rawText) || fastAliasMap.get(textBase);
-                if (!id) {
-                    for (let [keyLabel, keyId] of fastAliasMap.entries()) {
-                        if (rawText.includes(keyLabel)) {
-                            id = keyId;
-                            break;
-                        }
-                    }
-                }
-                el.setAttribute('data-ns-id', id || 'unknown');
+                const id = fastAliasMap.get(rawText) || fastAliasMap.get(textBase) || 'unknown';
+                el.setAttribute('data-ns-id', id);
             }
 
             const nsId = el.getAttribute('data-ns-id');
             
             // Búsqueda simple: Texto visual + ID oculto
-            const searchableText = (rawText + ' ' + textBase + ' ' + nsId).toLowerCase();
+            const searchableText = rawText + ' ' + textBase + ' ' + nsId;
             const isMatch = terms.every(t => searchableText.includes(t));
 
             el.style.display = isMatch ? "" : "none";
@@ -344,24 +400,19 @@ if (!window.__nsFilterExtensionLoaded) {
             if (isMatch) {
                 matchCount++;
                 addHighlights(el, terms);
+                hasActiveHighlights = true;
             }
         });
 
         // Actualizar contador
         const counter = document.getElementById('ns-filter-counter');
         if (counter) {
-            if (terms.length > 0) {
-                counter.textContent = `${matchCount} resultado${matchCount !== 1 ? 's' : ''}`;
-            } else {
-                counter.textContent = '';
-            }
+            counter.textContent = `${matchCount} resultado${matchCount !== 1 ? 's' : ''}`;
         }
     }
 
     function init() {
         console.log("Extensión NetSuite cargada: Motor de Filtrado Optimizado");
-        
-        setTimeout(buildAliasMap, 1000);
         injectStyles();
         const searchContainer = getOrCreateSearchContainer();
         const searchInput = document.getElementById('ns-filter-search-input');
@@ -398,7 +449,11 @@ if (!window.__nsFilterExtensionLoaded) {
             activeDropdown.prepend(searchContainer);
             searchContainer.style.display = 'block';
             searchInput.value = '';
-            applyFilter('', activeDropdown);
+            
+            // Lazy build: construir el alias map la primera vez que se abre un dropdown
+            buildAliasMap(() => {
+                applyFilter('', activeDropdown);
+            });
             
             isDropdownLocked = true;
             activeDropdown.classList.add('ns-dropdown-locked');
