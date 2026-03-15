@@ -126,16 +126,9 @@ if (!window.__nsFilterExtensionLoaded) {
         display: flex;
         align-items: center;
     }
-    .ns-record-modal-icon {
-        position: absolute;
-        left: 10px;
-        color: #9ca3af;
-        pointer-events: none;
-        font-size: 15px;
-    }
     .ns-record-modal-input {
         width: 100%;
-        padding: 10px 12px 10px 34px;
+        padding: 10px 12px;
         border: 1px solid #d1d5db;
         border-radius: 8px;
         font-size: 15px;
@@ -146,6 +139,7 @@ if (!window.__nsFilterExtensionLoaded) {
         transition: border-color 0.15s, box-shadow 0.15s;
     }
     .ns-record-modal-input:focus {
+
         border-color: #2563eb;
         box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
         background: #fff;
@@ -154,6 +148,14 @@ if (!window.__nsFilterExtensionLoaded) {
         overflow-y: auto;
         flex: 1;
         padding: 6px 0;
+    }
+    .ns-record-history-label {
+        padding: 8px 20px 4px;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: #9ca3af;
     }
     .ns-record-modal-empty {
         padding: 32px 20px;
@@ -674,6 +676,35 @@ if (!window.__nsFilterExtensionLoaded) {
         let filteredFields = [];
         let activeIndex = -1;
         let previouslyFlashed = null;
+        let isShowingHistory = false;
+
+        const HISTORY_KEY = 'ns_field_search_history';
+        const MAX_HISTORY = 15;
+
+        // ---- Historial de búsquedas en localStorage ----
+        function getSearchHistory() {
+            try {
+                const raw = localStorage.getItem(HISTORY_KEY);
+                return raw ? JSON.parse(raw) : [];
+            } catch(e) {
+                return [];
+            }
+        }
+
+        function addToSearchHistory(field) {
+            try {
+                let history = getSearchHistory();
+                // Remover duplicado si ya existe
+                history = history.filter(h => h.fieldId !== field.fieldId);
+                // Agregar al inicio
+                history.unshift({ fieldId: field.fieldId, label: field.label });
+                // Limitar a MAX_HISTORY
+                if (history.length > MAX_HISTORY) history = history.slice(0, MAX_HISTORY);
+                localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+            } catch(e) {
+                // localStorage no disponible, silenciar
+            }
+        }
 
         // ---- Extracción de campos del formulario ----
         function extractFormFields() {
@@ -776,10 +807,6 @@ if (!window.__nsFilterExtensionLoaded) {
             const inputWrapper = document.createElement('div');
             inputWrapper.className = 'ns-record-modal-input-wrapper';
 
-            const icon = document.createElement('span');
-            icon.className = 'ns-record-modal-icon';
-            icon.textContent = '🔍';
-
             modalInput = document.createElement('input');
             modalInput.id = 'ns-record-modal-input';
             modalInput.className = 'ns-record-modal-input';
@@ -787,7 +814,6 @@ if (!window.__nsFilterExtensionLoaded) {
             modalInput.type = 'text';
             modalInput.autocomplete = 'off';
 
-            inputWrapper.appendChild(icon);
             inputWrapper.appendChild(modalInput);
             header.appendChild(title);
             header.appendChild(inputWrapper);
@@ -870,16 +896,40 @@ if (!window.__nsFilterExtensionLoaded) {
             const terms = term.trim().toLowerCase().split(/\s+/).filter(t => t);
             
             if (terms.length === 0) {
-                filteredFields = [...currentFields];
-            } else {
-                filteredFields = currentFields.filter(f => {
-                    const searchable = (f.label + ' ' + f.fieldId).toLowerCase();
-                    return terms.every(t => searchable.includes(t));
-                });
+                // Sin texto: mostrar historial
+                showHistory();
+                return;
             }
+
+            // Con texto: buscar en TODOS los campos del formulario
+            isShowingHistory = false;
+            filteredFields = currentFields.filter(f => {
+                const searchable = (f.label + ' ' + f.fieldId).toLowerCase();
+                return terms.every(t => searchable.includes(t));
+            });
 
             activeIndex = filteredFields.length > 0 ? 0 : -1;
             renderResults(terms);
+        }
+
+        // ---- Mostrar historial ----
+        function showHistory() {
+            isShowingHistory = true;
+            const history = getSearchHistory();
+
+            // Resolver elementos del DOM para cada entry del historial
+            filteredFields = history.map(h => {
+                // Buscar el campo en el form actual
+                const match = currentFields.find(f => f.fieldId === h.fieldId);
+                return {
+                    fieldId: h.fieldId,
+                    label: h.label,
+                    element: match ? match.element : null
+                };
+            });
+
+            activeIndex = filteredFields.length > 0 ? 0 : -1;
+            renderResults();
         }
 
         // ---- Renderizar lista de resultados ----
@@ -889,15 +939,24 @@ if (!window.__nsFilterExtensionLoaded) {
             if (filteredFields.length === 0) {
                 const empty = document.createElement('div');
                 empty.className = 'ns-record-modal-empty';
-                empty.textContent = currentFields.length === 0 
-                    ? 'No se encontraron campos en este formulario'
+                empty.textContent = isShowingHistory 
+                    ? 'Sin historial de búsquedas recientes'
                     : 'Sin coincidencias';
                 modalResults.appendChild(empty);
                 modalCounter.textContent = '';
                 return;
             }
 
-            modalCounter.textContent = `${filteredFields.length} campo${filteredFields.length !== 1 ? 's' : ''}`;
+            // Etiqueta de sección
+            if (isShowingHistory) {
+                const historyLabel = document.createElement('div');
+                historyLabel.className = 'ns-record-history-label';
+                historyLabel.textContent = 'Recientes';
+                modalResults.appendChild(historyLabel);
+                modalCounter.textContent = '';
+            } else {
+                modalCounter.textContent = `${filteredFields.length} campo${filteredFields.length !== 1 ? 's' : ''}`;
+            }
 
             filteredFields.forEach((field, idx) => {
                 const item = document.createElement('div');
@@ -949,6 +1008,8 @@ if (!window.__nsFilterExtensionLoaded) {
 
         // ---- Seleccionar un campo: cerrar modal y scroll ----
         function selectField(field) {
+            // Guardar en historial
+            addToSearchHistory(field);
             closeModal();
 
             // Limpiar flash anterior
@@ -982,11 +1043,10 @@ if (!window.__nsFilterExtensionLoaded) {
 
             // Extraer campos frescos cada vez que se abre
             currentFields = extractFormFields();
-            filteredFields = [...currentFields];
-            activeIndex = currentFields.length > 0 ? 0 : -1;
 
             modalInput.value = '';
-            renderResults();
+            // Mostrar historial por defecto
+            showHistory();
             
             modalOverlay.classList.add('ns-modal-visible');
             
