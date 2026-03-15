@@ -232,32 +232,49 @@ if (!window.__nsFilterExtensionLoaded) {
         if (mapBuilt) return;
         mapBuilt = true;
         
-        const html = document.documentElement.innerHTML;
-        let count = 0;
+        function extractFrom(obj, targetMap) {
+            if (!obj || typeof obj !== 'object') return;
+            let seen = new Set();
+            
+            function walk(n) {
+                if (!n || typeof n !== 'object' || seen.has(n)) return;
+                seen.add(n);
+                
+                if (Array.isArray(n)) {
+                    for (let i = 0; i < n.length; i++) {
+                        let item = n[i];
+                        if (Array.isArray(item) && item.length >= 2 && typeof item[0] === 'string' && typeof item[1] === 'string') {
+                            let val = item[0].toLowerCase();
+                            let txt = item[1].replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
+                            if (val.length > 1) targetMap.set(txt, val);
+                        } else {
+                            walk(item);
+                        }
+                    }
+                } else {
+                    let val = n.value || n.id || n.internalid;
+                    let txt = n.text || n.label || n.name;
+                    if (typeof val === 'string' && typeof txt === 'string' && val.trim() !== '') {
+                        targetMap.set(txt.replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase(), val.toLowerCase());
+                    }
+                    for (let k in n) {
+                        try { walk(n[k]); } catch(e) {}
+                     }
+                }
+            }
+            walk(obj);
+        }
 
-        // Regex 1: Detectar arrays estáticos ["internalid", "Label"]
-        const regex1 = /\[\s*['"]([a-z0-9_]{3,})['"]\s*,\s*(['"])(.*?)\2/gi;
-        let m;
-        while ((m = regex1.exec(html)) !== null) {
-            let id = m[1].toLowerCase();
-            let label = m[3].replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
-            if (label && id !== 'true' && id !== 'false') {
-                fastAliasMap.set(label, id);
-                count++;
-            }
-        }
+        // El secreto para Firefox: wrappedJSObject
+        const pageWindow = typeof window.wrappedJSObject !== 'undefined' ? window.wrappedJSObject : window;
         
-        // Regex 2: Detectar addSelectOption(..., 'internalid', 'Label')
-        const regex2 = /addSelectOption\s*\([^,]+,\s*['"]([a-z0-9_]{3,})['"]\s*,\s*(['"])(.*?)\2/gi;
-        while ((m = regex2.exec(html)) !== null) {
-            let id = m[1].toLowerCase();
-            let label = m[3].replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
-            if (label) {
-                fastAliasMap.set(label, id);
-                count++;
-            }
+        try {
+            if (pageWindow.NS) extractFrom(pageWindow.NS, fastAliasMap);
+            if (pageWindow._dynamicData) extractFrom(pageWindow._dynamicData, fastAliasMap);
+            console.log(`[NetSuite Extension Debug] Diccionario construido con ${fastAliasMap.size} IDs.`);
+        } catch(e) {
+            console.error("[NetSuite Extension] Error accediendo a variables globales:", e);
         }
-        console.log(`[NetSuite Extension] Diccionario Regex construido con ${count} IDs ocultos.`);
     }
 
     function applyFilter(term, contextNode = document.body) {
@@ -305,11 +322,9 @@ if (!window.__nsFilterExtensionLoaded) {
             const rawText = el.textContent.replace(/[\s\u00A0]+/g, ' ').trim().toLowerCase();
             const textBase = rawText.replace(/[()]/g, ' ').trim();
             
-            // CACHEO DE RENDIMIENTO (O(1)): Solo calcular el ID la primera vez
+            // Extraer ID nativo y cachearlo en el DOM
             if (!el.hasAttribute('data-ns-id')) {
                 let id = fastAliasMap.get(rawText) || fastAliasMap.get(textBase);
-                
-                // Fallback por si la fila dice "Company Name (Custom)" y el map tiene "Company Name"
                 if (!id) {
                     for (let [keyLabel, keyId] of fastAliasMap.entries()) {
                         if (rawText.includes(keyLabel)) {
@@ -322,9 +337,9 @@ if (!window.__nsFilterExtensionLoaded) {
             }
 
             const nsId = el.getAttribute('data-ns-id');
-            // Eliminar el uso de hiddenData anterior, solo confiar en el Regex exacto
-            const searchableText = (rawText + ' ' + textBase + ' ' + nsId).toLowerCase();
             
+            // Búsqueda simple: Texto visual + ID oculto
+            const searchableText = (rawText + ' ' + textBase + ' ' + nsId).toLowerCase();
             const isMatch = terms.every(t => searchableText.includes(t));
 
             el.style.display = isMatch ? "" : "none";
